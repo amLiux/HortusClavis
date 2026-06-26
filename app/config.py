@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -10,7 +10,13 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str = ""
     bootstrap_admin_password: str = ""
 
-    model_config = {"env_prefix": "iam_", "env_file": ".env"}
+    model_config = SettingsConfigDict(env_prefix="iam_", env_file=".env")
+
+    def model_post_init(self, _data):
+        if self.database_url.startswith("postgresql://"):
+            self.database_url = self.database_url.replace(
+                "postgresql://", "postgresql+asyncpg://", 1
+            )
 
 
 settings = Settings()
