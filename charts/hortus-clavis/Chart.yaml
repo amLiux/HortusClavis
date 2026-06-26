@@ -1,0 +1,18 @@
+apiVersion: v2
+name: hortus-clavis
+description: Multi-tenant Identity & Access Management service — Hortus Clavis
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - iam
+  - auth
+  - rbac
+  - identity
+  - access-control
+home: https://github.com/anomalyco/hortus-clavis
+sources:
+  - https://github.com/anomalyco/hortus-clavis
+maintainers:
+  - name: Jardin Binario
+    email: dev@jardinbinario.com

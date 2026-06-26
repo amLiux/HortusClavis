@@ -1,0 +1,108 @@
+# ── Hortus Clavis — Helm values ──────────────────────────────
+# Deploys only the IAM app. Bring your own PostgreSQL & Redis.
+# ─────────────────────────────────────────────────────────────
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/anomalyco/hortus-clavis
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsUser: 1000
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 8000
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: iam.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+# ── Application config (non-sensitive) ──────────────────────
+config:
+  debug: false
+  jwtExpiration: 7200
+  bootstrapAdminEmail: ""
+  logLevel: info
+
+# ── Secrets (sensitive — override per environment) ──────────
+secrets:
+  jwtSecret: "change-me-to-a-random-64-char-string"
+  bootstrapAdminPassword: ""
+
+  # Full connection URLs. Preferred over individual fields below.
+  databaseUrl: ""
+  redisUrl: ""
+
+# ── External PostgreSQL ─────────────────────────────────────
+# Only used when secrets.databaseUrl is empty.
+postgresql:
+  host: ""
+  port: 5432
+  database: jardinero
+  username: jardinero
+  password: ""
+
+# ── External Redis ──────────────────────────────────────────
+# Only used when secrets.redisUrl is empty.
+redis:
+  host: ""
+  port: 6379
+  password: ""
+  db: 0
+  tls:
+    enabled: false

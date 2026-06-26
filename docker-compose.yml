@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: jardinero
+      POSTGRES_USER: jardinero
+      POSTGRES_PASSWORD: jardinero_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - hc-net
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - hc-net
+
+  loki:
+    image: grafana/loki:3.4
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - hc-net
+
+  promtail:
+    image: grafana/promtail:3.4
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./infra/promtail/config.yml:/etc/promtail/config.yml
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - hc-net
+
+  iam:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      IAM_DATABASE_URL: postgresql+asyncpg://jardinero:jardinero_dev@postgres:5432/jardinero
+      IAM_REDIS_URL: redis://redis:6379/0
+      IAM_JWT_SECRET: ${IAM_JWT_SECRET:-dev-secret-change-in-production}
+      IAM_JWT_EXPIRATION: ${IAM_JWT_EXPIRATION:-7200}
+      IAM_DEBUG: "false"
+      IAM_BOOTSTRAP_ADMIN_EMAIL: ${IAM_BOOTSTRAP_ADMIN_EMAIL:-}
+      IAM_BOOTSTRAP_ADMIN_PASSWORD: ${IAM_BOOTSTRAP_ADMIN_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - hc-net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.6
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - loki
+    networks:
+      - hc-net
+
+networks:
+  hc-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:

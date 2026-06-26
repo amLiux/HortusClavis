@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hortus-clavis.fullname" . }}
+  labels:
+    {{- include "hortus-clavis.labels" . | nindent 4 }}
+data:
+  IAM_DEBUG: {{ .Values.config.debug | quote }}
+  IAM_JWT_EXPIRATION: {{ .Values.config.jwtExpiration | quote }}
+  IAM_BOOTSTRAP_ADMIN_EMAIL: {{ .Values.config.bootstrapAdminEmail | quote }}
+  IAM_LOG_LEVEL: {{ .Values.config.logLevel | quote }}

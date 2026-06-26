@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Env
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Tests (not needed at runtime)
+tests/
+
+# Dev infra
+infra/
+docker-compose.yml
+
+# Helm chart
+charts/
+
+# Docs
+README.md
+
+# Skill
+skills/

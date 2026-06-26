@@ -1,0 +1,40 @@
+[project]
+name = "hortusclavis"
+version = "0.1.0"
+description = "Multi-tenant Identity & Access Management service"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.18.4",
+    "asyncpg>=0.31.0",
+    "bcrypt<4.1",
+    "fastapi>=0.136.3",
+    "fastapi-mail>=1.6.4",
+    "greenlet>=3.5.1",
+    "httpx>=0.28.1",
+    "passlib[bcrypt]>=1.7.4",
+    "pydantic-settings>=2.14.1",
+    "pyjwt>=2.13.0",
+    "redis>=8.0.0",
+    "sqlalchemy>=2.0.50",
+    "uvicorn[standard]>=0.49.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "pre-commit>=4.6.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.16",
+    "safety>=3.8.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
