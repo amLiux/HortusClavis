@@ -138,7 +138,7 @@ helm upgrade --install iam ./charts/hortus-clavis \
 
 ```bash
 # Start PG and Redis however you like
-docker run -d --name pg -e POSTGRES_PASSWORD=devpass -p 5432:5432 postgres:16-alpine
+docker run -d --name pg -e POSTGRES_PASSWORD=devpass -p 5432:5432 postgres:18-alpine
 docker run -d --name redis -p 6379:6379 redis:7-alpine
 
 # Deploy the app
