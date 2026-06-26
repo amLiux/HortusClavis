@@ -7,8 +7,10 @@ RUN pip install uv --quiet
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-cache
 
+ENV PATH="/app/.venv/bin:$PATH"
+
 COPY . .
 
 EXPOSE 8000
 
-CMD uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
