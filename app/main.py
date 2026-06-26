@@ -9,6 +9,7 @@ from app.database import async_session
 from app.routers import admin, auth
 from app.services.bootstrap import bootstrap
 from app.utils.logger import get_logger
+from app.utils.migrate import run_migrations
 from app.utils.redis import close_redis, init_redis
 
 logger = get_logger(__name__)
@@ -19,6 +20,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("server_started", extra={"props": {"service": "hortus-clavis"}})
     await init_redis()
     logger.info("redis_connected")
+
+    await run_migrations()
 
     async with async_session() as db:
         await bootstrap(db)
