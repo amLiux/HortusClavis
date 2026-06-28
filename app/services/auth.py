@@ -5,13 +5,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.users import User
+from app.utils.permissions import get_user_permissions
 from app.utils.redis import (
     blacklist_token,
     cache_verify,
+    delete_cached_verify,
     get_cached_verify,
     is_blacklisted,
 )
-from app.utils.permissions import get_user_permissions
 from app.utils.security import create_access_token, decode_access_token, verify_password
 
 
@@ -30,10 +31,6 @@ class AuthService:
         return token, expires_in
 
     async def verify(self, token: str) -> dict:
-        cached = await get_cached_verify(token)
-        if cached:
-            return cached
-
         try:
             payload = decode_access_token(token)
         except Exception:
@@ -42,6 +39,10 @@ class AuthService:
         jti = payload.get("jti")
         if jti and await is_blacklisted(jti):
             raise HTTPException(401, "Token has been revoked")
+
+        cached = await get_cached_verify(token)
+        if cached:
+            return cached
 
         user_id = payload["sub"]
 
@@ -58,7 +59,11 @@ class AuthService:
         response = {
             "authenticated": True,
             "auth_type": "user",
-            "user": {"id": str(user.id), "name": f"{user.name} {user.last_name}".strip(), "email": user.email},
+            "user": {
+                "id": str(user.id),
+                "name": f"{user.name} {user.last_name}".strip(),
+                "email": user.email,
+            },
             "permissions": permissions,
             "expires_at": expires_at.isoformat(),
         }
@@ -78,3 +83,4 @@ class AuthService:
         exp = payload.get("exp")
         if jti and exp:
             await blacklist_token(jti, datetime.fromtimestamp(exp, tz=UTC))
+        await delete_cached_verify(token)

@@ -59,6 +59,11 @@ async def get_cached_verify(token: str) -> dict | None:
     return json.loads(cached) if cached else None
 
 
+async def delete_cached_verify(token: str) -> None:
+    r = await get_redis()
+    await r.delete(_verify_cache_key(token))
+
+
 async def invalidate_user_cache(user_id: str) -> None:
     r = await get_redis()
     pattern = f"user:{user_id}:permissions"
