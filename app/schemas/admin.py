@@ -64,3 +64,28 @@ class UserRoleResponse(BaseModel):
     role_name: str
     service_name: str
     model_config = {"from_attributes": True}
+
+
+class OAuthClientInput(BaseModel):
+    name: str
+    service_id: uuid.UUID
+    redirect_uris: list[str]
+    scopes: str = "openid profile email offline_access hc.permissions"
+    is_confidential: bool = True
+
+
+class OAuthClientResponse(BaseModel):
+    id: uuid.UUID
+    client_id: str
+    name: str
+    service_id: uuid.UUID
+    redirect_uris: list[str]
+    scopes: str
+    is_confidential: bool
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+
+class OAuthClientCreated(OAuthClientResponse):
+    client_secret: str | None = None
+    """Returned only once, at creation time. Store it in the client application."""

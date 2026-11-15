@@ -7,12 +7,15 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models.action import Action
+from app.models.oauth_client import OAuthClient
 from app.models.role import Role
 from app.models.role_permission import RolePermission
 from app.models.service import Service
 from app.models.user_role import UserRole
-from app.models.users import User
 from app.schemas.admin import (
+    OAuthClientCreated,
+    OAuthClientInput,
+    OAuthClientResponse,
     RoleAssignmentInput,
     RoleInput,
     RoleResponse,
@@ -20,10 +23,10 @@ from app.schemas.admin import (
     ServiceResponse,
     UserRoleResponse,
 )
+from app.services import oidc as oidc_service
 from app.services.role import RoleService
 from app.utils.dependencies import get_current_user
 from app.utils.permissions import TENANT_ADMIN_ACTIONS, check_permission, check_permission_by_role
-from app.utils.permissions import get_user_permissions
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -222,6 +225,69 @@ async def remove_user_role(
     await check_permission_by_role(db, user, role_id, "manage_users")
     svc = RoleService(db)
     await svc.remove_user_role(user_id, role_id)
+
+
+@router.post("/oauth-clients", response_model=OAuthClientCreated, status_code=201)
+async def create_oauth_client(
+    input: OAuthClientInput,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    await check_permission(db, user, input.service_id, "manage_service")
+
+    svc_result = await db.execute(select(Service).where(Service.id == input.service_id))
+    if not svc_result.scalar_one_or_none():
+        raise HTTPException(404, "Service not found")
+
+    client, secret = await oidc_service.create_client(
+        db,
+        service_id=input.service_id,
+        name=input.name,
+        redirect_uris=input.redirect_uris,
+        scopes=input.scopes,
+        is_confidential=input.is_confidential,
+    )
+    response = OAuthClientCreated.model_validate(client)
+    response.client_secret = secret
+    return response
+
+
+@router.get("/oauth-clients", response_model=list[OAuthClientResponse])
+async def list_oauth_clients(
+    service_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    await check_permission(db, user, service_id, "manage_service")
+    result = await db.execute(
+        select(OAuthClient)
+        .where(OAuthClient.service_id == service_id)
+        .order_by(OAuthClient.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+@router.delete("/oauth-clients/{client_id}", status_code=204)
+async def delete_oauth_client(
+    client_id: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    client = await oidc_service.get_client(db, client_id)
+    if not client:
+        raise HTTPException(404, "OAuth client not found")
+    await check_permission(db, user, client.service_id, "manage_service")
+    await db.delete(client)
+
+
+@router.post("/signing-keys/rotate")
+async def rotate_signing_key(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    await check_permission(db, user, (await _get_iam_service(db)).id, "manage_keys")
+    key = await oidc_service.rotate_signing_key(db)
+    return {"kid": key.kid, "alg": key.alg, "created_at": key.created_at}
 
 
 async def _get_iam_service(db: AsyncSession) -> Service:
