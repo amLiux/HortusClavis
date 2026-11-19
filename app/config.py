@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str = ""
     bootstrap_admin_password: str = ""
 
-    model_config = SettingsConfigDict(env_prefix="iam_", env_file=".env")
+    # The same .env is read by the app and by compose: ignore keys that are not
+    # part of the IAM settings (POSTGRES_*, HC_*_VOLUME, ...) instead of failing.
+    model_config = SettingsConfigDict(env_prefix="iam_", env_file=".env", extra="ignore")
 
     def model_post_init(self, _data):
         if self.database_url.startswith("postgresql://"):

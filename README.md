@@ -29,14 +29,14 @@ graph TB
     end
 
     subgraph "Hortus Clavis"
-        HC[FastAPI App<br/>port 8000]
-        PG[PostgreSQL<br/>port 5432]
-        RD[Redis<br/>port 6379]
+        HC[FastAPI App<br/>port 8001]
+        PG[PostgreSQL<br/>port 5433]
+        RD[Redis<br/>port 6380]
     end
 
     subgraph Observability
-        LK[Loki<br/>port 3100]
-        GF[Grafana<br/>port 3000]
+        LK[Loki<br/>port 3101]
+        GF[Grafana<br/>port 3001]
         PT[Promtail]
     end
 
@@ -182,7 +182,7 @@ sequenceDiagram
     DB-->>App: RS256 key available for JWKS
     App->>App: bootstrap complete
     App-->>Cache: verify cache ready
-    Note over App: Server listening on :8000
+    Note over App: Server listening on :8001
 ```
 
 ---
@@ -246,22 +246,69 @@ versions/
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
-- Docker + Docker Compose
+- Docker Compose **or** Podman Compose (`podman compose`), auto-detected
 - Make
 
 ### 1. Start dependencies
 
 ```bash
+make deps-up        # postgres 5433 + redis 6380 only
+```
+
+`make deps-up` starts **only** PostgreSQL and Redis; the app runs from your shell.
+
+Ports are offset so HortusClavis and DevCadence can run side by side:
+
+| Service | HortusClavis | DevCadence |
+|---|---|---|
+| app | **8001** | 3000 |
+| PostgreSQL | **5433** | 5432 |
+| Redis | **6380** | 6379 |
+| Grafana / Loki | **3001 / 3101** | — |
+
+`make deps-up-all` also starts the IAM container (8001), Grafana (3001), Loki (3101) and Promtail.
+Promtail needs a container runtime socket; with podman set
+`CONTAINER_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock`.
+
+### Running alongside DevCadence
+
+```bash
+# HortusClavis
+make deps-up && make dev                 # postgres:5433, redis:6380, app:8001
+
+# DevCadence (other terminal / repo)
+make compose-up && make dev-and-worker   # postgres:5432, redis:6379, app:3000
+```
+
+DevCadence talks to Hortus with `AUTH_API_URL=http://127.0.0.1:8001`.
+
+### Adopting an existing database volume
+
+Compose volume names come from `HC_PG_VOLUME` / `HC_REDIS_VOLUME` (`.env` or shell), so the stack can
+reuse data that already exists instead of starting empty:
+
+```bash
+podman volume ls
+podman inspect <old-container> --format '{{json .Mounts}}'
+echo 'HC_PG_VOLUME=<volume>' >> .env
+echo 'HC_REDIS_VOLUME=<volume>' >> .env
+podman stop <old-container>      # free the port first
 make deps-up
 ```
 
-This starts PostgreSQL (port 5432), Redis (6379), Loki (3100), and Grafana (3000).
+For a clean database instead, skip that and let the app bootstrap the admin from
+`IAM_BOOTSTRAP_ADMIN_EMAIL` / `IAM_BOOTSTRAP_ADMIN_PASSWORD` on first start.
 
 ### 2. Configure environment
 
 ```bash
 cp .env.example .env
-# edit .env to set JWT secret, admin credentials, etc.
+# compose refuses to start without POSTGRES_PASSWORD and IAM_JWT_SECRET
+# (docker-compose.yml has no literal fallback), so generate real values:
+sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" .env
+sed -i "s|^IAM_JWT_SECRET=.*|IAM_JWT_SECRET=$(openssl rand -hex 32)|" .env
+sed -i "s|jardinero:change-me-local-dev-password@|jardinero:$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2)@|" .env
+# then edit the admin credentials if you want a different bootstrap admin
 ```
 
 ### 3. Run database migrations
@@ -276,7 +323,7 @@ make migrate
 make dev
 ```
 
-The server starts at `http://localhost:8000`. On first startup, it automatically seeds the **IAM** service and creates a **super_admin** role.
+The server starts at `http://localhost:8001`. On first startup, it automatically seeds the **IAM** service and creates a **super_admin** role.
 
 ### 5. Run tests
 
@@ -292,20 +339,21 @@ pytest tests/integration/  # integration tests (needs deps-up)
 
 | Command | What it does |
 |---|---|
-| `make dev` | Start the FastAPI dev server with hot-reload (`uv run uvicorn app.main:app --reload`) |
+| `make dev` | Start the FastAPI dev server with hot-reload on port 8001 (`PORT=8000 make dev` to override) |
 | `make lint` | Run ruff linter (`uv run ruff check .`) |
 | `make format` | Auto-format with ruff (`uv run ruff format .`) |
 | `make test` | Run all tests (`uv run pytest`) |
 | `make migrate` | Apply pending Alembic migrations (`uv run alembic upgrade head`) |
 | `make makemigrations message="..."` | Auto-generate a new Alembic migration |
-| `make deps-up` | Start PostgreSQL + Redis + Loki + Promtail + Grafana |
-| `make deps-up-all` | Start all containers including the IAM app itself |
+| `make deps-up` | Start **PostgreSQL (5433) + Redis (6380)** only |
+| `make deps-up-all` | Start everything: PG + Redis + IAM container + Loki + Promtail + Grafana |
 | `make deps-down` | Stop all containers (data persists) |
 | `make deps-down-all` | Stop all containers and delete volumes (data wiped) |
 | `make logs` | Tail logs from all Docker containers |
 | `make logs-app` | Tail logs from the IAM container only |
 | `make grafana` | Open Grafana in your browser |
-| `make loki-ready` | Wait until Loki is accepting connections |
+| `make compose-config` | Print the resolved compose config (ports, volume names) |
+| `make loki-ready` | Wait until Loki is accepting connections (3101) |
 
 ---
 
@@ -380,8 +428,8 @@ All settings come from environment variables with the `IAM_` prefix, loaded from
 
 | Variable | Default | Description |
 |---|---|---|
-| `IAM_DATABASE_URL` | `postgresql+asyncpg://jardinero:jardinero_dev@localhost:5432/jardinero` | PostgreSQL connection string |
-| `IAM_REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
+| `IAM_DATABASE_URL` | `postgresql+asyncpg://jardinero:jardinero_dev@localhost:5433/jardinero` | PostgreSQL connection string |
+| `IAM_REDIS_URL` | `redis://localhost:6380/0` | Redis connection string |
 | `IAM_JWT_SECRET` | `dev-secret-change-in-production!!` | JWT signing key (min 32 chars) |
 | `IAM_JWT_EXPIRATION` | `7200` | Legacy HS256 token lifetime in seconds |
 | `IAM_OIDC_ENABLED` | `true` | Expose the OIDC discovery/authorize/token endpoints |
@@ -404,7 +452,7 @@ All settings come from environment variables with the `IAM_` prefix, loaded from
 ```bash
 cp .env.example .env
 # edit .env — set IAM_JWT_SECRET and IAM_BOOTSTRAP_ADMIN_*
-make deps-up             # start PG + Redis
+make deps-up             # start PG (5433) + Redis (6380)
 make migrate             # run Alembic
 make dev                 # start the server → auto-seeds IAM
 ```
@@ -413,12 +461,12 @@ make dev                 # start the server → auto-seeds IAM
 
 ```bash
 # Login as super-admin
-TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8001/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"admin@jardinbinario.com","password":"admin"}' | jq -r .access_token)
 
 # Create the service + auto-seed admin/user roles + tenant-admin actions
-curl -s -X POST http://localhost:8000/admin/services \
+curl -s -X POST http://localhost:8001/admin/services \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -444,18 +492,18 @@ This automatically:
 
 ```bash
 # Get the tenant's admin role ID
-ROLES=$(curl -s http://localhost:8000/admin/services/{service_id}/roles \
+ROLES=$(curl -s http://localhost:8001/admin/services/{service_id}/roles \
   -H "Authorization: Bearer $TOKEN")
 ADMIN_ROLE_ID=$(echo $ROLES | jq -r '.[] | select(.name=="admin") | .id')
 
 # Register the new admin user
-USER=$(curl -s -X POST http://localhost:8000/auth/register \
+USER=$(curl -s -X POST http://localhost:8001/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"email":"tenant-admin@example.com","password":"s3cret","name":"Tenant","last_name":"Admin"}')
 USER_ID=$(echo $USER | jq -r .id)
 
 # Assign the admin role
-curl -s -X POST http://localhost:8000/admin/users/$USER_ID/roles \
+curl -s -X POST http://localhost:8001/admin/users/$USER_ID/roles \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{\"role_ids\": [\"$ADMIN_ROLE_ID\"]}"
@@ -504,7 +552,7 @@ Notes:
 When upgrading from a pre-tenant-admin version, the server automatically migrates existing services on startup. It adds `manage_service`, `manage_roles`, and `manage_users` actions to every existing non-IAM service and grants them to the service's `admin` role. You can verify the migration:
 
 ```bash
-curl -s http://localhost:8000/admin/services/{service_id} \
+curl -s http://localhost:8001/admin/services/{service_id} \
   -H "Authorization: Bearer $TOKEN" | jq '.actions[].name'
 ```
 
@@ -512,11 +560,11 @@ curl -s http://localhost:8000/admin/services/{service_id} \
 
 ```bash
 # Get the action IDs you want to grant
-ACTIONS=$(curl -s http://localhost:8000/admin/services/{service_id} \
+ACTIONS=$(curl -s http://localhost:8001/admin/services/{service_id} \
   -H "Authorization: Bearer $TOKEN" | jq .actions)
 
 # Create the role
-curl -s -X POST http://localhost:8000/admin/services/{service_id}/roles \
+curl -s -X POST http://localhost:8001/admin/services/{service_id}/roles \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -529,7 +577,7 @@ curl -s -X POST http://localhost:8000/admin/services/{service_id}/roles \
 ### Add a Grafana dashboard for Loki
 
 ```bash
-make grafana         # opens http://localhost:3000
+make grafana         # opens http://localhost:3001
 ```
 
 Log in with `admin`/`admin`. The Loki datasource is auto-provisioned. You can query logs with:
