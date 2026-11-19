@@ -8,6 +8,16 @@ and persistence live in the service layer; parsing and encoding live in
 The only functions here that are not handlers are the four ``_`` helpers
 below, and all of them build HTTP responses (status codes, headers, cookies,
 templates).
+
+Logging (the pattern HC-07 extends to the rest of the app)
+----------------------------------------------------------
+``message`` is a snake_case event id and the details go in
+``extra={"props": {...}}``: ``oidc.login_succeeded``, ``oidc.login_failed``,
+``oidc.code_issued``, ``oidc.tokens_issued``, ``oidc.client_auth_failed``,
+``oidc.refresh_reuse_detected``, ``oidc.access_token_rejected``,
+``oidc.logout``, plus ``oidc.request_rejected`` for every JSON error response.
+Only ids are logged — never tokens, authorization codes, client secrets,
+passwords or the request query string.
 """
 
 import uuid
@@ -22,6 +32,7 @@ from app.config import settings
 from app.database import get_db
 from app.services import oidc as oidc_service
 from app.services.oidc import OAuthError
+from app.utils.logger import get_logger
 from app.utils.oidc import (
     SESSION_COOKIE,
     add_query_params,
@@ -32,6 +43,8 @@ from app.utils.oidc import (
     is_secure_url,
     parse_basic_auth,
 )
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["oidc"])
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
@@ -52,6 +65,16 @@ def _error_response(error: OAuthError) -> JSONResponse:
     Adds ``Cache-Control: no-store`` and, for client authentication failures, a
     ``WWW-Authenticate: Basic`` challenge.
     """
+    logger.warning(
+        "oidc.request_rejected",
+        extra={
+            "props": {
+                "error": error.error,
+                "description": error.description,
+                "status": error.status_code,
+            }
+        },
+    )
     headers = {"Cache-Control": "no-store"}
     if error.error == "invalid_client":
         headers["WWW-Authenticate"] = "Basic"
@@ -69,6 +92,10 @@ def _redirect_error(
 
     Only used after the client and its redirect_uri have been validated.
     """
+    logger.info(
+        "oidc.authorize_error_redirect",
+        extra={"props": {"error": error, "description": description}},
+    )
     url = add_query_params(
         redirect_uri,
         {"error": error, "error_description": description, "state": state},

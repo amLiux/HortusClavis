@@ -27,6 +27,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.service import Service
 from app.models.signing_key import SigningKey
 from app.models.users import User
+from app.utils.logger import get_logger
 from app.utils.oidc import (
     decode_rs256,
     generate_rsa_key,
@@ -41,7 +42,20 @@ from app.utils.oidc import (
 from app.utils.permissions import get_user_permissions
 from app.utils.security import hash_password, verify_password
 
+logger = get_logger(__name__)
+
 DEFAULT_SCOPES = "openid profile email offline_access hc.permissions"
+
+#: Client-facing text per rejection reason. Internal reason codes go to the logs only.
+_INVALID_TOKEN_MESSAGES = {
+    "malformed": "Malformed token",
+    "unknown_kid": "Unknown signing key",
+    "bad_signature_or_expired": "Invalid token",
+    "not_an_access_token": "Not an access token",
+    "unknown_audience": "Unknown audience",
+    "bad_subject": "Invalid token",
+    "user_inactive": "User is inactive",
+}
 
 
 class OAuthError(Exception):
@@ -89,6 +103,7 @@ async def ensure_signing_key(db: AsyncSession) -> SigningKey:
     key = SigningKey(kid=kid, alg="RS256", private_key_pem=private_pem, is_active=True)
     db.add(key)
     await db.flush()
+    logger.info("oidc.signing_key_created", extra={"props": {"kid": kid}})
     return key
 
 
@@ -110,13 +125,19 @@ async def rotate_signing_key(db: AsyncSession) -> SigningKey:
     in-flight tokens keep validating while clients refresh their cache.
     """
     previous = await db.execute(select(SigningKey).where(SigningKey.is_active.is_(True)))
+    retired = 0
     for old in previous.scalars().all():
         old.is_active = False
         old.retired_at = now()
+        retired += 1
     private_pem, kid, _jwk = generate_rsa_key()
     key = SigningKey(kid=kid, alg="RS256", private_key_pem=private_pem, is_active=True)
     db.add(key)
     await db.flush()
+    logger.info(
+        "oidc.signing_key_rotated",
+        extra={"props": {"kid": kid, "retired": retired}},
+    )
     return key
 
 
@@ -179,6 +200,18 @@ async def create_client(
     )
     db.add(client)
     await db.flush()
+    # The plaintext secret is returned to the caller and never logged.
+    logger.info(
+        "oidc.client_created",
+        extra={
+            "props": {
+                "client_id": client.client_id,
+                "service_id": str(service_id),
+                "confidential": is_confidential,
+                "scopes": scopes,
+            }
+        },
+    )
     return client, plaintext_secret
 
 
@@ -210,11 +243,20 @@ def authenticate_client(client: OAuthClient | None, client_secret: str | None) -
     the token endpoint instead.
     """
     if not client:
+        logger.warning("oidc.client_auth_failed", extra={"props": {"reason": "unknown_client"}})
         raise OAuthError("invalid_client", "Unknown client", status_code=401)
     if client.is_confidential:
         if not client_secret or not client.client_secret_hash:
+            logger.warning(
+                "oidc.client_auth_failed",
+                extra={"props": {"reason": "missing_secret", "client_id": client.client_id}},
+            )
             raise OAuthError("invalid_client", "Client authentication required", status_code=401)
         if not verify_password(client_secret, client.client_secret_hash):
+            logger.warning(
+                "oidc.client_auth_failed",
+                extra={"props": {"reason": "bad_secret", "client_id": client.client_id}},
+            )
             raise OAuthError("invalid_client", "Invalid client secret", status_code=401)
     return client
 
@@ -262,9 +304,17 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> User
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if not user or not verify_password(password, user.password_hash):
+        logger.warning(
+            "oidc.login_failed",
+            extra={"props": {"email": email, "reason": "invalid_credentials"}},
+        )
         raise OAuthError("access_denied", "Invalid email or password")
     if not user.is_active:
+        logger.warning("oidc.login_failed", extra={"props": {"email": email, "reason": "inactive"}})
         raise OAuthError("access_denied", "Account is inactive")
+    logger.info(
+        "oidc.login_succeeded", extra={"props": {"user_id": str(user.id), "email": user.email}}
+    )
     return user
 
 
@@ -331,6 +381,17 @@ async def create_authorization_code(
         )
     )
     await db.flush()
+    logger.info(
+        "oidc.code_issued",
+        extra={
+            "props": {
+                "client_id": client.client_id,
+                "user_id": str(user.id),
+                "scope": " ".join(sorted(scopes)),
+                "pkce": bool(code_challenge),
+            }
+        },
+    )
     return raw_code
 
 
@@ -352,24 +413,40 @@ async def consume_authorization_code(
     )
     code = result.scalar_one_or_none()
     if not code:
+        _log_code_rejected("unknown_code", client)
         raise OAuthError("invalid_grant", "Unknown authorization code")
     if code.client_id != client.client_id:
+        _log_code_rejected("wrong_client", client, code.client_id)
         raise OAuthError("invalid_grant", "Authorization code was issued to another client")
     if code.consumed_at is not None:
+        # A replay here is either a bug in the client or a stolen code.
+        _log_code_rejected("already_used", client, code.client_id)
         raise OAuthError("invalid_grant", "Authorization code already used")
     if code.expires_at <= now():
+        _log_code_rejected("expired", client, code.client_id)
         raise OAuthError("invalid_grant", "Authorization code expired")
     if code.redirect_uri != redirect_uri:
+        _log_code_rejected("redirect_uri_mismatch", client, code.client_id)
         raise OAuthError("invalid_grant", "redirect_uri does not match the authorization request")
     if code.code_challenge:
         if not code_verifier:
+            _log_code_rejected("missing_verifier", client, code.client_id)
             raise OAuthError("invalid_grant", "code_verifier is required")
         if not verify_pkce(code_verifier, code.code_challenge, code.code_challenge_method):
+            _log_code_rejected("bad_verifier", client, code.client_id)
             raise OAuthError("invalid_grant", "Invalid code_verifier")
 
     code.consumed_at = now()
     await db.flush()
     return code
+
+
+def _log_code_rejected(reason: str, client: OAuthClient, issued_to: str | None = None) -> None:
+    """Log a rejected authorization code without leaking the code itself."""
+    props = {"reason": reason, "client_id": client.client_id}
+    if issued_to:
+        props["issued_to"] = issued_to
+    logger.warning("oidc.code_rejected", extra={"props": props})
 
 
 async def exchange_authorization_code(
@@ -496,6 +573,19 @@ async def issue_tokens(
             db, user=user, client=client, scope=" ".join(sorted(scopes))
         )
 
+    # Counts only: token values must never reach the logs.
+    logger.info(
+        "oidc.tokens_issued",
+        extra={
+            "props": {
+                "client_id": client.client_id,
+                "user_id": str(user.id),
+                "scopes": sorted(scopes),
+                "id_token": "id_token" in response,
+                "refresh_token": "refresh_token" in response,
+            }
+        },
+    )
     return response
 
 
@@ -543,21 +633,51 @@ async def refresh_tokens(
     )
     token = result.scalar_one_or_none()
     if not token:
+        logger.warning(
+            "oidc.refresh_rejected",
+            extra={"props": {"reason": "unknown_token", "client_id": client.client_id}},
+        )
         raise OAuthError("invalid_grant", "Unknown refresh token")
     if token.client_id != client.client_id:
+        logger.warning(
+            "oidc.refresh_rejected",
+            extra={"props": {"reason": "wrong_client", "client_id": client.client_id}},
+        )
         raise OAuthError("invalid_grant", "Refresh token was issued to another client")
     if token.revoked_at is not None:
+        # Reuse after rotation: the strongest signal of a stolen token.
+        logger.error(
+            "oidc.refresh_reuse_detected",
+            extra={
+                "props": {
+                    "client_id": client.client_id,
+                    "user_id": str(token.user_id),
+                }
+            },
+        )
         raise OAuthError("invalid_grant", "Refresh token already used")
     if token.expires_at <= now():
+        logger.info(
+            "oidc.refresh_rejected",
+            extra={"props": {"reason": "expired", "client_id": client.client_id}},
+        )
         raise OAuthError("invalid_grant", "Refresh token expired")
 
     user_result = await db.execute(select(User).where(User.id == token.user_id))
     user = user_result.scalar_one_or_none()
     if not user or not user.is_active:
+        logger.warning(
+            "oidc.refresh_rejected",
+            extra={"props": {"reason": "user_inactive", "user_id": str(token.user_id)}},
+        )
         raise OAuthError("invalid_grant", "User is inactive")
 
     token.revoked_at = now()
     await db.flush()
+    logger.info(
+        "oidc.refresh_rotated",
+        extra={"props": {"client_id": client.client_id, "user_id": str(user.id)}},
+    )
 
     return await issue_tokens(
         db,
@@ -566,6 +686,18 @@ async def refresh_tokens(
         scope=token.scope,
         auth_time=int(now().timestamp()),
         include_refresh=True,
+    )
+
+
+def _invalid_token(reason: str, **props) -> OAuthError:
+    """Build an ``invalid_token`` error and log why the token was refused.
+
+    The token itself is never logged. Callers use this as
+    ``raise _invalid_token("reason")``.
+    """
+    logger.warning("oidc.access_token_rejected", extra={"props": {"reason": reason, **props}})
+    return OAuthError(
+        "invalid_token", _INVALID_TOKEN_MESSAGES.get(reason, "Invalid token"), status_code=401
     )
 
 
@@ -580,32 +712,32 @@ async def validate_access_token(db: AsyncSession, raw_token: str) -> AccessToken
     try:
         header = jwt.get_unverified_header(raw_token)
     except jwt.PyJWTError:
-        raise OAuthError("invalid_token", "Malformed token", status_code=401) from None
+        raise _invalid_token("malformed") from None
 
     key = await get_signing_key_by_kid(db, str(header.get("kid") or ""))
     if not key:
-        raise OAuthError("invalid_token", "Unknown signing key", status_code=401)
+        raise _invalid_token("unknown_kid", kid=str(header.get("kid") or ""))
 
     try:
         payload = decode_rs256(raw_token, public_pem_from_private(key.private_key_pem))
     except jwt.PyJWTError:
-        raise OAuthError("invalid_token", "Invalid token", status_code=401) from None
+        raise _invalid_token("bad_signature_or_expired") from None
 
     if payload.get("token_use") != "access":
-        raise OAuthError("invalid_token", "Not an access token", status_code=401)
+        raise _invalid_token("not_an_access_token")
 
     client = await get_client(db, str(payload.get("aud") or ""))
     if not client:
-        raise OAuthError("invalid_token", "Unknown audience", status_code=401)
+        raise _invalid_token("unknown_audience", audience=str(payload.get("aud") or ""))
 
     try:
         user_id = uuid.UUID(str(payload["sub"]))
     except (KeyError, ValueError):
-        raise OAuthError("invalid_token", "Invalid token", status_code=401) from None
+        raise _invalid_token("bad_subject") from None
 
     user = await get_user_by_id(db, user_id)
     if not user or not user.is_active:
-        raise OAuthError("invalid_token", "User is inactive", status_code=401)
+        raise _invalid_token("user_inactive", user_id=str(user_id))
 
     scopes = {s for s in str(payload.get("scope", "")).split() if s}
     return AccessTokenContext(user=user, client=client, scopes=scopes)
@@ -665,7 +797,26 @@ async def resolve_logout_redirect(
     """
     client = await _client_from_id_token(db, id_token_hint)
     if not client or post_logout_redirect_uri not in (client.redirect_uris or []):
+        logger.warning(
+            "oidc.logout_rejected",
+            extra={
+                "props": {
+                    "reason": "unregistered_redirect_uri",
+                    "client_id": client.client_id if client else None,
+                    "has_id_token_hint": bool(id_token_hint),
+                }
+            },
+        )
         raise OAuthError("invalid_request", "post_logout_redirect_uri is not registered")
+    logger.info(
+        "oidc.logout",
+        extra={
+            "props": {
+                "client_id": client.client_id,
+                "has_id_token_hint": bool(id_token_hint),
+            }
+        },
+    )
     return post_logout_redirect_uri
 
 
@@ -693,6 +844,16 @@ async def userinfo(db: AsyncSession, user: User, client: OAuthClient, scopes: se
             data["picture"] = user.avatar
     if "hc.permissions" in scopes:
         data["hc.permissions"] = permissions.get(service_name, [])
+    logger.debug(
+        "oidc.userinfo_served",
+        extra={
+            "props": {
+                "client_id": client.client_id,
+                "user_id": str(user.id),
+                "scopes": sorted(scopes),
+            }
+        },
+    )
     return data
 
 
