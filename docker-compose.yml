@@ -106,9 +106,10 @@ networks:
 
 # Volume names are pinned so an existing data volume can be adopted instead of
 # recreated: set HC_PG_VOLUME / HC_REDIS_VOLUME (shell or .env) to the volume you
-# want to keep. Defaults create/keep the compose-managed volumes.
+# want to keep. Defaults are dev-scoped names so a fresh clone never attaches to
+# an old volume initialized with a different password.
 volumes:
   pgdata:
-    name: ${HC_PG_VOLUME:-hortusclavis_pgdata}
+    name: ${HC_PG_VOLUME:-hortusclavis_dev_pgdata}
   redisdata:
-    name: ${HC_REDIS_VOLUME:-hortusclavis_redisdata}
+    name: ${HC_REDIS_VOLUME:-hortusclavis_dev_redisdata}
