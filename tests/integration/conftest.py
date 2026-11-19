@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -14,14 +15,25 @@ from app.models.role_permission import RolePermission
 from app.models.service import Service
 from app.models.user_role import UserRole
 from app.models.users import User
-from app.routers import admin, auth
+from app.routers import admin, auth, oidc
 
 BOOTSTRAP_ACTIONS = [
-    "admin", "register", "login", "verify", "logout", "refresh",
-    "manage_services", "manage_roles", "manage_keys", "manage_users",
+    "admin",
+    "register",
+    "login",
+    "verify",
+    "logout",
+    "refresh",
+    "manage_services",
+    "manage_roles",
+    "manage_keys",
+    "manage_users",
 ]
 
-TEST_DB_URL = "postgresql+asyncpg://jardinero:jardinero_dev@localhost:5432/jardinero_test"
+TEST_DB_URL = os.getenv(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://jardinero:jardinero_dev@localhost:5432/jardinero_test",
+)
 
 engine = create_async_engine(TEST_DB_URL, echo=False, poolclass=NullPool)
 test_async_session = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
@@ -35,7 +47,9 @@ async def setup_db():
     async with test_async_session() as session:
         result = await session.execute(select(Service).where(Service.name == "iam"))
         if not result.scalar_one_or_none():
-            svc = Service(name="iam", display_name="IAM Service", description="Identity and Access Management")
+            svc = Service(
+                name="iam", display_name="IAM Service", description="Identity and Access Management"
+            )
             session.add(svc)
             await session.flush()
 
@@ -47,8 +61,10 @@ async def setup_db():
             await session.flush()
 
             role = Role(
-                service_id=svc.id, name="super_admin",
-                description="Full IAM super-admin access", is_system=True,
+                service_id=svc.id,
+                name="super_admin",
+                description="Full IAM super-admin access",
+                is_system=True,
             )
             session.add(role)
             await session.flush()
@@ -86,6 +102,7 @@ def test_app():
     _app = FastAPI(title="test-hortus-clavis")
     _app.include_router(admin.router)
     _app.include_router(auth.router)
+    _app.include_router(oidc.router)
     _app.dependency_overrides[get_db] = override_get_db
 
     @_app.get("/health")
@@ -107,13 +124,19 @@ async def client(test_app) -> AsyncGenerator[AsyncClient, Any]:
 async def admin_headers(client: AsyncClient, db_session: AsyncSession) -> dict[str, str]:
     await client.post(
         "/auth/register",
-        json={"email": "admin@test.com", "password": "admin123", "name": "Admin", "last_name": "User"},
+        json={
+            "email": "admin@test.com",
+            "password": "admin123",
+            "name": "Admin",
+            "last_name": "User",
+        },
     )
 
     result = await db_session.execute(select(User).where(User.email == "admin@test.com"))
     user = result.scalar_one_or_none()
     result = await db_session.execute(
-        select(Role).join(Service, Service.id == Role.service_id)
+        select(Role)
+        .join(Service, Service.id == Role.service_id)
         .where(Service.name == "iam", Role.name == "super_admin")
     )
     role = result.scalar_one_or_none()
@@ -121,6 +144,8 @@ async def admin_headers(client: AsyncClient, db_session: AsyncSession) -> dict[s
         db_session.add(UserRole(user_id=user.id, role_id=role.id))
         await db_session.commit()
 
-    resp = await client.post("/auth/login", json={"email": "admin@test.com", "password": "admin123"})
+    resp = await client.post(
+        "/auth/login", json={"email": "admin@test.com", "password": "admin123"}
+    )
     token = resp.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}

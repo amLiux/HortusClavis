@@ -178,6 +178,8 @@ sequenceDiagram
     DB-->>App: IAM service seeded
     DB-->>App: super_admin role created
     DB-->>App: tenant-admin migration (existing services)
+    App->>DB: ensure_signing_key()
+    DB-->>App: RS256 key available for JWKS
     App->>App: bootstrap complete
     App-->>Cache: verify cache ready
     Note over App: Server listening on :8000
@@ -336,6 +338,40 @@ pytest tests/integration/  # integration tests (needs deps-up)
 
 > **Permission model**: every request checks `iam/{action}` first (global super-admin), then `{service}/{action}` (tenant-level admin). A user with `iam/manage_roles` can manage roles on any service; a user with only `maticuz/manage_roles` is confined to the maticuz service.
 
+### OIDC provider — `/oidc`
+
+Hortus Clavis is a standards-compliant OpenID Connect provider (authorization code + PKCE,
+RS256, rotating refresh tokens). Any OIDC client can use it; `/auth/login` stays available
+for simple API clients.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/.well-known/openid-configuration` | — | Discovery document |
+| GET | `/oidc/jwks.json` | — | Public signing keys (RS256) |
+| GET | `/oidc/authorize` | — | Authorization endpoint; renders the login form when there is no session |
+| POST | `/oidc/authorize` | — | Login form submission |
+| POST | `/oidc/token` | client | `authorization_code` and `refresh_token` grants |
+| GET | `/oidc/userinfo` | Bearer | User claims + `hc.permissions` for the client's service |
+| GET | `/oidc/logout` | — | Clears the browser session, optional `post_logout_redirect_uri` |
+
+Supported scopes: `openid`, `profile`, `email`, `offline_access` (refresh token),
+`hc.permissions` (adds the service permission list to the token and userinfo).
+
+Access tokens carry `aud = client_id`, `hc.service`, and — with `hc.permissions` —
+`hc.permissions`. They are signed with RS256, so clients validate locally against JWKS
+without sharing any secret.
+
+### OAuth clients — `/admin/oauth-clients`
+
+| Method | Path | Required permission | Description |
+|---|---|---|---|
+| POST | `/admin/oauth-clients` | `{svc}/manage_service` | Create a client; the secret is returned only once |
+| GET | `/admin/oauth-clients?service_id=` | `{svc}/manage_service` | List a service's clients |
+| DELETE | `/admin/oauth-clients/{client_id}` | `{svc}/manage_service` | Delete a client and its codes/tokens |
+
+Key rotation lives at `POST /admin/signing-keys/rotate` (`iam/manage_keys`). Old keys stay
+in JWKS so tokens already issued keep validating.
+
 ---
 
 ## Configuration
@@ -347,7 +383,14 @@ All settings come from environment variables with the `IAM_` prefix, loaded from
 | `IAM_DATABASE_URL` | `postgresql+asyncpg://jardinero:jardinero_dev@localhost:5432/jardinero` | PostgreSQL connection string |
 | `IAM_REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
 | `IAM_JWT_SECRET` | `dev-secret-change-in-production!!` | JWT signing key (min 32 chars) |
-| `IAM_JWT_EXPIRATION` | `7200` | Token lifetime in seconds |
+| `IAM_JWT_EXPIRATION` | `7200` | Legacy HS256 token lifetime in seconds |
+| `IAM_OIDC_ENABLED` | `true` | Expose the OIDC discovery/authorize/token endpoints |
+| `IAM_OIDC_ISSUER` | `http://localhost:8000` | Public issuer URL. Must match the URL clients reach; set it to your public HTTPS URL in production |
+| `IAM_OIDC_ACCESS_TOKEN_EXPIRATION` | `900` | OIDC access/ID token lifetime in seconds |
+| `IAM_OIDC_REFRESH_TOKEN_EXPIRATION` | `2592000` | Refresh token lifetime in seconds (30 days) |
+| `IAM_OIDC_AUTHORIZATION_CODE_EXPIRATION` | `300` | Authorization code lifetime in seconds |
+| `IAM_OIDC_SESSION_EXPIRATION` | `3600` | Browser session cookie lifetime in seconds |
+| `IAM_OIDC_SIGNING_KEY_BITS` | `2048` | RSA key size generated on first use |
 | `IAM_DEBUG` | `true` | Enable SQLAlchemy echo + verbose logs |
 | `IAM_BOOTSTRAP_ADMIN_EMAIL` | `""` | Auto-create this user on startup |
 | `IAM_BOOTSTRAP_ADMIN_PASSWORD` | `""` | Password for the bootstrap admin |
@@ -417,6 +460,44 @@ curl -s -X POST http://localhost:8000/admin/users/$USER_ID/roles \
   -H 'Content-Type: application/json' \
   -d "{\"role_ids\": [\"$ADMIN_ROLE_ID\"]}"
 ```
+
+### Register an OIDC client
+
+Create the service (or reuse an existing one), then register the application as a client.
+The secret is shown once; store it in the application's environment.
+
+```bash
+curl -s -X POST http://localhost:8000/admin/oauth-clients \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "DevCadence",
+    "service_id": "{service_id}",
+    "redirect_uris": ["https://devcadence.example.com/api/auth/callback/hortusclavis"],
+    "scopes": "openid profile email offline_access hc.permissions",
+    "is_confidential": true
+  }'
+```
+
+The client then uses the standard OIDC flow:
+
+1. Discovery from `${IAM_OIDC_ISSUER}/.well-known/openid-configuration`.
+2. Redirect the browser to `authorization_endpoint` with `scope`, `state`, `nonce`, and an
+   S256 `code_challenge`.
+3. Exchange the returned `code` at `token_endpoint` with the client secret and `code_verifier`.
+4. Validate the ID token against `jwks_uri` and call `userinfo` for permissions.
+
+Notes:
+
+- There is no consent screen: clients are first-party and created by an administrator.
+- Public clients (`is_confidential: false`) must use PKCE; confidential clients may skip it.
+- The browser session cookie is a signed JWT (`hc_session`, httpOnly). Logout clears it;
+  there is no server-side session revocation yet.
+- `IAM_OIDC_ISSUER` must be the URL the browser reaches. Behind a proxy, set it to the
+  public HTTPS origin or discovery and redirects will point to the wrong host.
+- Signing keys are stored in PostgreSQL so they survive restarts and support rotation.
+  Protect database dumps accordingly; the next phase moves them behind envelope
+  encryption or a KMS.
 
 ### Upgrade existing services (migration)
 

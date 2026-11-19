@@ -1,8 +1,14 @@
 import uuid
 
 import pytest
+from jwt import PyJWTError
 
-from app.utils.security import create_access_token, decode_access_token, hash_password, verify_password
+from app.utils.security import (
+    create_access_token,
+    decode_access_token,
+    hash_password,
+    verify_password,
+)
 
 
 class TestPasswordHashing:
@@ -41,7 +47,7 @@ class TestJWT:
         assert "exp" in payload
 
     def test_decode_invalid_token(self):
-        with pytest.raises(Exception):
+        with pytest.raises(PyJWTError):
             decode_access_token("not.a.valid.jwt")
 
     def test_decode_wrong_secret(self):
@@ -49,7 +55,7 @@ class TestJWT:
         token, _ = create_access_token(user_id, "test@test.com")
         parts = token.split(".")
         tampered = parts[0] + "." + parts[1] + ".invalidsig"
-        with pytest.raises(Exception):
+        with pytest.raises(PyJWTError):
             decode_access_token(tampered)
 
     def test_unique_jti(self):
