@@ -397,6 +397,7 @@ async def userinfo_endpoint(request: Request, db: AsyncSession = Depends(get_db)
 @router.get("/oidc/logout")
 async def logout(
     id_token_hint: str | None = None,
+    client_id: str | None = None,
     post_logout_redirect_uri: str | None = None,
     state: str | None = None,
     db: AsyncSession = Depends(get_db),
@@ -413,6 +414,7 @@ async def logout(
             redirect_uri = await oidc_service.resolve_logout_redirect(
                 db,
                 id_token_hint=id_token_hint,
+                client_id=client_id,
                 post_logout_redirect_uri=post_logout_redirect_uri,
             )
         except OAuthError as exc:
