@@ -787,32 +787,45 @@ async def resolve_logout_redirect(
     db: AsyncSession,
     *,
     id_token_hint: str | None,
+    client_id: str | None,
     post_logout_redirect_uri: str,
 ) -> str:
     """Validate the RP's ``post_logout_redirect_uri`` and return it unchanged.
 
-    The URI must be registered for the client that owns ``id_token_hint``;
-    otherwise this raises ``invalid_request`` and the caller must not redirect
-    (open-redirect guard for RP-initiated logout).
+    The client is identified by ``id_token_hint`` when that token still verifies
+    and falls back to ``client_id`` when the hint is missing or expired: id
+    tokens are short-lived, browser sessions are not, so a late logout cannot
+    depend on having a usable hint (HC-02).
+
+    The URI must be registered for that client; otherwise this raises
+    ``invalid_request`` and the caller must not redirect (open-redirect guard
+    for RP-initiated logout).
     """
     client = await _client_from_id_token(db, id_token_hint)
+    resolved_by = "id_token_hint" if client else None
+    if not client and client_id:
+        client = await get_client(db, client_id)
+        resolved_by = "client_id" if client else None
+
     if not client or post_logout_redirect_uri not in (client.redirect_uris or []):
         logger.warning(
             "oidc.logout_rejected",
             extra={
                 "props": {
                     "reason": "unregistered_redirect_uri",
-                    "client_id": client.client_id if client else None,
+                    "client_id": client.client_id if client else client_id,
                     "has_id_token_hint": bool(id_token_hint),
                 }
             },
         )
         raise OAuthError("invalid_request", "post_logout_redirect_uri is not registered")
+
     logger.info(
         "oidc.logout",
         extra={
             "props": {
                 "client_id": client.client_id,
+                "resolved_by": resolved_by,
                 "has_id_token_hint": bool(id_token_hint),
             }
         },

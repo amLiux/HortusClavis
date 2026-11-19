@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import uuid
+from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -271,3 +273,109 @@ async def test_token_endpoint_rejects_bad_client_secret(client: AsyncClient, db_
     )
     assert resp.status_code == 401
     assert resp.json()["error"] == "invalid_client"
+
+
+async def _id_token_for(db_session, client_id: str, *, expires_in: int = 900) -> str:
+    """Mint an ID token directly so logout can be tested without the code flow."""
+    from app.utils.oidc import now, sign_rs256
+
+    key = await oidc_service.ensure_signing_key(db_session)
+    await db_session.commit()
+    payload = {
+        "iss": ISSUER,
+        "sub": str(uuid.uuid4()),
+        "aud": client_id,
+        "iat": int(now().timestamp()),
+        "exp": int((now() + timedelta(seconds=expires_in)).timestamp()),
+        "token_use": "id",
+    }
+    return sign_rs256(payload, key.private_key_pem, key.kid)
+
+
+@pytest.mark.asyncio
+async def test_logout_with_client_id_redirects_and_clears_cookie(client: AsyncClient, db_session):
+    oauth_client, _secret = await _create_client(db_session)
+    resp = await client.get(
+        "/oidc/logout",
+        params={
+            "client_id": oauth_client.client_id,
+            "post_logout_redirect_uri": REDIRECT_URI,
+            "state": "bye-123",
+        },
+    )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert location.startswith(REDIRECT_URI)
+    query = parse_qs(urlsplit(location).query)
+    assert query["state"] == ["bye-123"]
+    cookie = resp.headers.get("set-cookie", "")
+    assert "hc_session=" in cookie
+    assert "Max-Age=0" in cookie
+
+
+@pytest.mark.asyncio
+async def test_logout_with_unknown_client_id_is_rejected(client: AsyncClient, db_session):
+    await _create_client(db_session)
+    resp = await client.get(
+        "/oidc/logout",
+        params={"client_id": "hc_does_not_exist", "post_logout_redirect_uri": REDIRECT_URI},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_logout_without_client_identifier_is_rejected(client: AsyncClient, db_session):
+    await _create_client(db_session)
+    resp = await client.get(
+        "/oidc/logout", params={"post_logout_redirect_uri": REDIRECT_URI}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_logout_rejects_unregistered_post_logout_redirect(client: AsyncClient, db_session):
+    oauth_client, _secret = await _create_client(db_session)
+    resp = await client.get(
+        "/oidc/logout",
+        params={
+            "client_id": oauth_client.client_id,
+            "post_logout_redirect_uri": "https://evil.test/bye",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_logout_with_id_token_hint_still_redirects(client: AsyncClient, db_session):
+    oauth_client, _secret = await _create_client(db_session)
+    hint = await _id_token_for(db_session, oauth_client.client_id)
+    resp = await client.get(
+        "/oidc/logout",
+        params={
+            "id_token_hint": hint,
+            "post_logout_redirect_uri": REDIRECT_URI,
+            "state": "hint-123",
+        },
+    )
+    assert resp.status_code == 302
+    query = parse_qs(urlsplit(resp.headers["location"]).query)
+    assert query["state"] == ["hint-123"]
+
+
+@pytest.mark.asyncio
+async def test_logout_falls_back_to_client_id_when_hint_is_expired(client: AsyncClient, db_session):
+    oauth_client, _secret = await _create_client(db_session)
+    hint = await _id_token_for(db_session, oauth_client.client_id, expires_in=-60)
+    resp = await client.get(
+        "/oidc/logout",
+        params={
+            "id_token_hint": hint,
+            "client_id": oauth_client.client_id,
+            "post_logout_redirect_uri": REDIRECT_URI,
+        },
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith(REDIRECT_URI)
