@@ -10,6 +10,9 @@ from app.models.role_permission import RolePermission
 from app.models.service import Service
 from app.models.user_role import UserRole
 from app.models.users import User
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 TENANT_ADMIN_ACTIONS = ["manage_service", "manage_roles", "manage_users"]
 
@@ -38,7 +41,9 @@ async def get_user_permissions(db: AsyncSession, user_id: uuid.UUID) -> dict[str
     return permissions
 
 
-async def check_permission(db: AsyncSession, user: User, service_id: uuid.UUID, action: str) -> None:
+async def check_permission(
+    db: AsyncSession, user: User, service_id: uuid.UUID, action: str
+) -> None:
     svc_result = await db.execute(select(Service).where(Service.id == service_id))
     svc = svc_result.scalar_one_or_none()
     if not svc:
@@ -49,10 +54,26 @@ async def check_permission(db: AsyncSession, user: User, service_id: uuid.UUID, 
     svc_actions = perms.get(svc.name, [])
     iam_actions = perms.get("iam", [])
     if action not in svc_actions and action not in iam_actions:
+        logger.warning(
+            "rbac.permission_denied",
+            extra={
+                "props": {
+                    "user_id": str(user.id),
+                    "service": svc.name,
+                    "action": action,
+                }
+            },
+        )
         raise HTTPException(403, f"Missing permission: {svc.name}/{action}")
+    logger.debug(
+        "rbac.permission_granted",
+        extra={"props": {"user_id": str(user.id), "service": svc.name, "action": action}},
+    )
 
 
-async def check_permission_by_role(db: AsyncSession, user: User, role_id: uuid.UUID, action: str) -> None:
+async def check_permission_by_role(
+    db: AsyncSession, user: User, role_id: uuid.UUID, action: str
+) -> None:
     role_result = await db.execute(select(Role).where(Role.id == role_id))
     role = role_result.scalar_one_or_none()
     if not role:

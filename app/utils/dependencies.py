@@ -5,7 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.users import User
+from app.utils.logger import get_logger
 from app.utils.security import decode_access_token
+
+logger = get_logger(__name__)
 
 security = HTTPBearer()
 
@@ -18,12 +21,21 @@ async def get_current_user(
     try:
         payload = decode_access_token(token)
     except Exception:
+        logger.warning("auth.token_rejected", extra={"props": {"reason": "decode_error"}})
         raise HTTPException(401, "Invalid or expired token") from None
 
     result = await db.execute(select(User).where(User.id == payload["sub"]))
     user = result.scalar_one_or_none()
     if not user:
+        logger.warning(
+            "auth.token_rejected",
+            extra={"props": {"reason": "user_not_found", "user_id": str(payload.get("sub"))}},
+        )
         raise HTTPException(401, "User not found")
     if not user.is_active:
+        logger.warning(
+            "auth.token_rejected",
+            extra={"props": {"reason": "inactive", "user_id": str(user.id)}},
+        )
         raise HTTPException(403, "Account is inactive")
     return user
