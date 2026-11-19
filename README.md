@@ -282,6 +282,13 @@ make compose-up && make dev-and-worker   # postgres:5432, redis:6379, app:3000
 
 DevCadence talks to Hortus with `AUTH_API_URL=http://127.0.0.1:8001`.
 
+`make deps-up-all` and `make dev` both use **8001**: the first runs the IAM container there, the second
+runs uvicorn from your shell. Do not run them together — `make dev` refuses to start if 8001 is taken
+and suggests `PORT=8002 make dev`. The normal local flow is `make deps-up` + `make dev`.
+
+If 5433 or 6380 is already taken (typically a leftover `hc-test-pg` / `hc-test-redis`), `make deps-up`
+stops before starting anything and prints the container name to stop.
+
 ### Adopting an existing database volume
 
 Compose volume names come from `HC_PG_VOLUME` / `HC_REDIS_VOLUME` (`.env` or shell), so the stack can
