@@ -1,39 +1,63 @@
+# Local development stack for HortusClavis.
+#
+# Host ports are offset so a sibling project (DevCadence: 3000/5432/6379) can run
+# at the same time:
+#   app 8001 · postgres 5433 · redis 6380 · grafana 3001 · loki 3101
+#
+# `make deps-up` starts postgres + redis only (explicit service list, so it works
+# on both docker compose and podman-compose). `make deps-up-all` starts everything.
+
 services:
   postgres:
     image: postgres:18-alpine
     environment:
-      POSTGRES_DB: jardinero
-      POSTGRES_USER: jardinero
-      POSTGRES_PASSWORD: jardinero_dev
+      POSTGRES_DB: ${POSTGRES_DB:-jardinero}
+      POSTGRES_USER: ${POSTGRES_USER:-jardinero}
+      # No literal default on purpose: compose must fail fast when .env is not
+      # set up, and secret scanners must never see a value committed here.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # postgres 18+ keeps data under a versioned subdir; mount the parent.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jardinero} -d ${POSTGRES_DB:-jardinero}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     networks:
       - hc-net
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     networks:
       - hc-net
 
   loki:
     image: grafana/loki:3.4
     ports:
-      - "3100:3100"
+      - "3101:3100"
     command: -config.file=/etc/loki/local-config.yaml
     networks:
       - hc-net
 
   promtail:
     image: grafana/promtail:3.4
+    # Needs a container runtime socket. With podman, start one and point
+    # CONTAINER_SOCKET at it (e.g. $XDG_RUNTIME_DIR/podman/podman.sock).
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./infra/promtail/config.yml:/etc/promtail/config.yml
+      - ${CONTAINER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - ./infra/promtail/config.yml:/etc/promtail/config.yml:ro
     command: -config.file=/etc/promtail/config.yml
     depends_on:
       - loki
@@ -43,20 +67,24 @@ services:
   iam:
     build: .
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
-      IAM_DATABASE_URL: postgresql+asyncpg://jardinero:jardinero_dev@postgres:5432/jardinero
+      # Full DSN from .env: keeps the password out of this file entirely
+      # (secret scanners read every line, even interpolations).
+      IAM_DATABASE_URL: ${IAM_DATABASE_URL_DOCKER:?}
       IAM_REDIS_URL: redis://redis:6379/0
-      IAM_JWT_SECRET: ${IAM_JWT_SECRET:-dev-secret-change-in-production}
+      # Required from .env (see .env.example); never committed with a value.
+      IAM_JWT_SECRET: ${IAM_JWT_SECRET:?}
       IAM_JWT_EXPIRATION: ${IAM_JWT_EXPIRATION:-7200}
+      IAM_OIDC_ISSUER: ${IAM_OIDC_ISSUER:-http://localhost:8001}
       IAM_DEBUG: "false"
       IAM_BOOTSTRAP_ADMIN_EMAIL: ${IAM_BOOTSTRAP_ADMIN_EMAIL:-}
       IAM_BOOTSTRAP_ADMIN_PASSWORD: ${IAM_BOOTSTRAP_ADMIN_PASSWORD:-}
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     networks:
       - hc-net
     restart: unless-stopped
@@ -64,9 +92,9 @@ services:
   grafana:
     image: grafana/grafana:11.6
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
-      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
     depends_on:
       - loki
     networks:
@@ -76,6 +104,12 @@ networks:
   hc-net:
     driver: bridge
 
+# Volume names are pinned so an existing data volume can be adopted instead of
+# recreated: set HC_PG_VOLUME / HC_REDIS_VOLUME (shell or .env) to the volume you
+# want to keep. Defaults are dev-scoped names so a fresh clone never attaches to
+# an old volume initialized with a different password.
 volumes:
   pgdata:
+    name: ${HC_PG_VOLUME:-hortusclavis_dev_pgdata}
   redisdata:
+    name: ${HC_REDIS_VOLUME:-hortusclavis_dev_redisdata}
