@@ -26,7 +26,10 @@ from app.schemas.admin import (
 from app.services import oidc as oidc_service
 from app.services.role import RoleService
 from app.utils.dependencies import get_current_user
+from app.utils.logger import get_logger
 from app.utils.permissions import TENANT_ADMIN_ACTIONS, check_permission, check_permission_by_role
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -87,6 +90,17 @@ async def create_service(
     await db.flush()
 
     await db.refresh(svc, ["actions"])
+    logger.info(
+        "service.created",
+        extra={
+            "props": {
+                "service_id": str(svc.id),
+                "service_name": svc.name,
+                "actions": len(action_map),
+                "actor_id": str(user.id),
+            }
+        },
+    )
     return svc
 
 
@@ -109,6 +123,16 @@ async def update_service(
     svc.base_url = input.base_url
     await db.flush()
     await db.refresh(svc)
+    logger.info(
+        "service.updated",
+        extra={
+            "props": {
+                "service_id": str(svc.id),
+                "service_name": svc.name,
+                "actor_id": str(user.id),
+            }
+        },
+    )
     return svc
 
 
@@ -125,6 +149,16 @@ async def delete_service(
     if not svc:
         raise HTTPException(404, "Service not found")
     await db.delete(svc)
+    logger.warning(
+        "service.deleted",
+        extra={
+            "props": {
+                "service_id": str(svc.id),
+                "service_name": svc.name,
+                "actor_id": str(user.id),
+            }
+        },
+    )
 
 
 @router.post("/services/{service_id}/roles", response_model=RoleResponse, status_code=201)
@@ -278,6 +312,16 @@ async def delete_oauth_client(
         raise HTTPException(404, "OAuth client not found")
     await check_permission(db, user, client.service_id, "manage_service")
     await db.delete(client)
+    logger.warning(
+        "oidc.client_deleted",
+        extra={
+            "props": {
+                "client_id": client.client_id,
+                "service_id": str(client.service_id),
+                "actor_id": str(user.id),
+            }
+        },
+    )
 
 
 @router.post("/signing-keys/rotate")
@@ -287,6 +331,10 @@ async def rotate_signing_key(
 ):
     await check_permission(db, user, (await _get_iam_service(db)).id, "manage_keys")
     key = await oidc_service.rotate_signing_key(db)
+    logger.info(
+        "oidc.signing_key_rotation_completed",
+        extra={"props": {"kid": key.kid, "actor_id": str(user.id)}},
+    )
     return {"kid": key.kid, "alg": key.alg, "created_at": key.created_at}
 
 

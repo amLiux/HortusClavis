@@ -5,6 +5,9 @@ from datetime import UTC, datetime
 from redis.asyncio import Redis as AsyncRedis
 
 from app.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 redis_client: AsyncRedis | None = None
 
@@ -12,6 +15,8 @@ redis_client: AsyncRedis | None = None
 async def init_redis() -> AsyncRedis:
     global redis_client
     redis_client = AsyncRedis.from_url(str(settings.redis_url), decode_responses=True)
+    # The URL is never logged: it may embed a password.
+    logger.info("redis_connected")
     return redis_client
 
 
@@ -20,6 +25,7 @@ async def close_redis() -> None:
     if redis_client:
         await redis_client.aclose()
         redis_client = None
+        logger.info("redis_disconnected")
 
 
 async def get_redis() -> AsyncRedis:
@@ -41,6 +47,7 @@ async def blacklist_token(jti: str, expires_at: datetime) -> None:
     remaining = int((expires_at - datetime.now(UTC)).total_seconds())
     if remaining > 0:
         await r.setex(_jti_key(jti), remaining, "1")
+        logger.debug("redis.token_blacklisted", extra={"props": {"jti": jti}})
 
 
 async def is_blacklisted(jti: str) -> bool:
@@ -70,3 +77,7 @@ async def invalidate_user_cache(user_id: str) -> None:
     keys = await r.keys(pattern)
     if keys:
         await r.delete(*keys)
+    logger.debug(
+        "redis.user_cache_invalidated",
+        extra={"props": {"user_id": user_id, "keys": len(keys)}},
+    )

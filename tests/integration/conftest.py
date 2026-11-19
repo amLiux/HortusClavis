@@ -99,7 +99,11 @@ async def db_session() -> AsyncGenerator[AsyncSession, Any]:
 def test_app():
     from fastapi import FastAPI
 
+    from app.main import log_requests
+
     _app = FastAPI(title="test-hortus-clavis")
+    # Same request logging middleware as production, so tests exercise it.
+    _app.middleware("http")(log_requests)
     _app.include_router(admin.router)
     _app.include_router(auth.router)
     _app.include_router(oidc.router)
