@@ -16,11 +16,8 @@ PORT ?= 8001
 # `make dev` binds 8001, the same host port as the `iam` container in
 # `make deps-up-all`. Do not run both: pick one (app from your shell, or the container).
 dev:
-	@if $(RUNTIME) ps --filter "publish=$(PORT)" --format "{{.Names}}" 2>/dev/null | grep -q .; then \
-	  echo "error: port $(PORT) is already taken by a container — 'make deps-up-all' runs iam there."; \
-	  echo "       use 'make deps-down-all' or set PORT=8002 make dev"; \
-	  exit 1; \
-	fi
+	@RUNTIME=$(RUNTIME) sh infra/preflight-ports.sh $(PORT) || { \
+	  echo "       (use 'PORT=8002 make dev' to pick another port)"; exit 1; }
 	uv run uvicorn app.main:app --reload --port $(PORT)
 
 lint:
@@ -42,19 +39,7 @@ makemigrations:
 
 # Refuse to start when something else already owns the ports, and say what to stop.
 preflight:
-	@for port in 5433 6380; do \
-	  name=$$($(RUNTIME) ps --filter "publish=$$port" --format "{{.Names}}" 2>/dev/null | head -1); \
-	  if [ -n "$$name" ]; then \
-	    echo "error: host port $$port is already taken by container '$$name'"; \
-	    echo "       stop it first:  $(RUNTIME) stop $$name"; \
-	    echo "       ports 5433/6380 are reserved for this compose stack"; \
-	    exit 1; \
-	  fi; \
-	done
-	@if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ':(5433|6380) '; then \
-	  echo "error: port 5433 or 6380 is in use by a non-container process"; \
-	  exit 1; \
-	fi
+	@RUNTIME=$(RUNTIME) sh infra/preflight-ports.sh 5433 6380
 
 deps-up: preflight
 	$(COMPOSE) up -d postgres redis
